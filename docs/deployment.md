@@ -1,15 +1,17 @@
 # Deployment behavior
 
 This document describes the intended deployment contract and the boundaries of
-the current internal engine. There is no stable public API, CLI, manifest schema,
-or framework module yet.
+the current engine. CLI, manifest, and Nix helper interfaces are experimental;
+framework modules are not implemented yet.
 
 ## Current implementation
 
 The Zig engine accepts an explicit list of source files and relative destination
 paths, one existing destination root, and an existing private state directory.
-The directories must be disjoint and on the same filesystem. Destination parent
-directories must already exist. Use only disposable directories during development.
+The roots must be disjoint and on the same filesystem. Missing parent directories
+beneath the destination root are installed within the journaled transaction.
+The Nix application wrapper initializes the two roots outside that transaction;
+those roots are not owned or removed by the engine.
 
 The private state directory belongs exclusively to one imprynt state. It holds
 the lock, committed state, journal, staged contents, and retained originals.
@@ -36,20 +38,26 @@ planner collects preflight conflicts and returns no executable actions when
 any conflict exists. Preparation may write private staging files, but preflight
 failure does not change managed destinations.
 
-The planned directory-creation feature will record directories created by
-imprynt and remove them only when no longer needed and empty. Existing directories
-will not be adopted. Directory creation and cleanup are not implemented yet.
+Record directories created by imprynt and remove them only when no longer
+needed and empty. Existing directories are not adopted. Staged directories are
+identified by inode and installed without replacement after journal publication.
+Rollback uses the same identity checks and removes only empty directories. An
+unneeded directory containing manual files stays recorded for later cleanup;
+a directory replaced outside imprynt is no longer owned. Inode reuse after
+external deletion is not a general concurrent-mutation safety guarantee.
 
 ## Paths and generation
 
-The planned build-time generator will enumerate input trees into an explicit
-per-file manifest. The runtime engine need not understand fonts or the framework
-invoking it. Framework modules will own lifecycle integration; generated file
-lists need not be read back into Nix evaluation.
+The build-time generator enumerates input trees into an explicit per-file
+manifest. The runtime engine does not understand fonts or the framework invoking
+it. Consumers own lifecycle integration; generated file lists need not be read
+back into Nix evaluation.
 
-Follow source symlinks to materialize regular files. Tree generation must reject
-broken links and cycles. The current runtime follows individual source links
-through the operating system and rejects non-regular source files.
+Follow source symlinks to materialize regular files. Tree generation rejects
+broken links, directory cycles, and non-regular files. Extension filtering is
+optional and case-insensitive; selected files retain relative paths. The runtime
+follows individual source links through the operating system and rejects
+non-regular source files.
 
 Destination roots are explicit. Resolve and record their locations, allowing
 a root itself to be a symlink. Open parent components beneath the root without
@@ -102,9 +110,9 @@ case-insensitive or Unicode-equivalent destination aliases are not yet handled
 as a complete safety boundary. Do not run this engine against concurrently
 modified or untrusted destinations.
 
-JSON state and journal documents are limited to 16 MiB. Diagnostics from the
-runtime currently identify error classes; exposing all planner conflicts to a
-future CLI remains work. Directory creation, tree generation, first-party module
-activation, real-font recognition, and Linux runtime execution are unimplemented
-or unverified. Removing an entire integration is not the same as removing
+JSON state and journal documents are limited to 16 MiB. Path-specific diagnostics in the
+CLI are available for preflight conflicts; recovery diagnostics currently report
+an error class and retain the journal. First-party module activation,
+real-font recognition, and Linux runtime execution are unimplemented or
+unverified. Removing an entire integration is not the same as removing
 individual declarations: automatic cleanup in that situation remains unresolved.
