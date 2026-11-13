@@ -1,7 +1,14 @@
 {
+  lib,
   runCommand,
   zig,
-  impryntSource ? ../.,
+  impryntSource ? lib.fileset.toSource {
+    root = ../.;
+    fileset = lib.fileset.unions [
+      ../build.zig
+      ../src
+    ];
+  },
 }:
 runCommand "imprynt-0.1.0"
   {

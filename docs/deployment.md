@@ -112,7 +112,8 @@ modified or untrusted destinations.
 
 JSON state and journal documents are limited to 16 MiB. Path-specific diagnostics in the
 CLI are available for preflight conflicts; recovery diagnostics currently report
-an error class and retain the journal. First-party module activation,
-real-font recognition, and Linux runtime execution are unimplemented or
-unverified. Removing an entire integration is not the same as removing
+an error class and retain the journal. First-party module activation and Linux
+runtime execution are unimplemented or unverified. Font discovery and application
+font caches belong to the consumer's platform integration, not the engine's
+commit. Removing an entire integration is not the same as removing
 individual declarations: automatic cleanup in that situation remains unresolved.
