@@ -1,75 +1,110 @@
-# Deployment contract
+# Deployment behavior
 
-These are accepted design decisions, not implemented guarantees. The deployment
-engine, manifest generator, and framework modules have not been implemented.
-Concrete schemas and public command/API names remain undecided.
+This document describes the intended deployment contract and the boundaries of
+the current internal engine. There is no stable public API, CLI, manifest schema,
+or framework module yet.
+
+## Current implementation
+
+The Zig engine accepts an explicit list of source files and relative destination
+paths, one existing destination root, and an existing private state directory.
+The directories must be disjoint and on the same filesystem. Destination parent
+directories must already exist. Use only disposable directories during development.
+
+The private state directory belongs exclusively to one imprynt state. It holds
+the lock, committed state, journal, staged contents, and retained originals.
+Do not use an ordinary directory containing other applications' files for it,
+edit its contents, or delete it to work around a recovery error. Root paths are
+recorded in state, so changing a root symlink does not silently relocate ownership.
+
+File fingerprints include SHA-256 contents and POSIX permission bits. Desired
+permissions are explicit (internally defaulting to 0644); ownership, ACLs,
+extended attributes, and timestamps are not managed. A missing previously
+managed file currently produces a conflict rather than being recreated.
 
 ## Ownership and conflicts
 
-Inputs may be directory trees, but ownership is per deployed file. Unrelated
-manual files survive updates and removal of a deployment declaration. There is
-no directory-ownership mode in the initial scope.
-
-Record directories created by imprynt; remove them only when no longer needed
-and empty. Existing directories are not adopted as owned directories.
+Ownership is per deployed file, even when a future generator accepts input trees.
+Unrelated manual files survive updates and removal of a deployment declaration.
+There is no directory-ownership mode in the initial scope.
 
 Compare actual managed files with the last committed state before updating or
 removing them. Unexpected existing files and externally changed managed files
-are conflicts. Initially, conflicts are errors, without backup or overwrite
-policies. Collect preflight conflicts and report them without starting managed
-file mutations. Preflight does not eliminate races with external writers.
+are conflicts, even when an unmanaged file matches the desired contents.
+Initially, conflicts are errors, without backup or overwrite policies. The
+planner collects preflight conflicts and returns no executable actions when
+any conflict exists. Preparation may write private staging files, but preflight
+failure does not change managed destinations.
 
-## Generation and application boundary
+The planned directory-creation feature will record directories created by
+imprynt and remove them only when no longer needed and empty. Existing directories
+will not be adopted. Directory creation and cleanup are not implemented yet.
 
-Build-time generation enumerates input trees into an explicit per-file manifest.
-The runtime engine applies that manifest; it does not need to understand fonts
-or the framework invoking it. Framework modules own lifecycle integration.
-Generated file lists do not need to be read back into Nix evaluation.
+## Paths and generation
 
-Follow source symlinks to materialize regular files. Broken links and cycles are
-generation errors. Destination managed roots are explicit: resolve and record
-their locations, allow a root itself to be a symlink, and reject unexpected
-symlinks beneath it. A changed root symlink target during management is an
-error, not an ordinary update.
+The planned build-time generator will enumerate input trees into an explicit
+per-file manifest. The runtime engine need not understand fonts or the framework
+invoking it. Framework modules will own lifecycle integration; generated file
+lists need not be read back into Nix evaluation.
 
-## Transaction boundary
+Follow source symlinks to materialize regular files. Tree generation must reject
+broken links and cycles. The current runtime follows individual source links
+through the operating system and rejects non-regular source files.
 
-One transaction covers one application using one managed state. It does not
-cover an entire framework activation or independently managed imprynt states.
-Serialize imprynt operations sharing that state with a lock. This is not a lock
-against unrelated programs writing destination files.
+Destination roots are explicit. Resolve and record their locations, allowing
+a root itself to be a symlink. Open parent components beneath the root without
+following symlinks; unexpected destination symlinks are conflicts. A changed
+root symlink target is an error, not an ordinary update. Absolute destination
+entries, empty components, NUL bytes, dot/parent components, duplicates, and
+file/parent overlaps are rejected.
 
-Maintain three separate artifacts:
+## Transactions and recovery
 
-- Desired manifest: the requested per-file deployment.
-- Committed state: the last committed deployment, including content hashes,
-  managed attributes, resolved roots, and created-directory ownership.
-- Recovery journal: the unfinished plan, staged and retained files, and durable
-  transaction progress.
+One transaction covers one application using one managed state, not an entire
+framework activation or independently managed imprynt states. Serialize operations
+sharing that state with a nonblocking exclusive file lock.
 
-Prepare new contents on the destination filesystem. Retain old files needed
-for rollback until commit, so recovery does not require old Nix store sources.
-This design aims for recoverability, not externally atomic visibility of a
-multi-file change.
-
-## Recovery
+Committed state records the previous deployment. A separately published journal
+records the next state and unfinished changes. New contents are staged and old
+files are retained until commit, so rollback does not require old Nix store
+sources. State and journal formats are internal and have no migration guarantee.
 
 A durable commit separates two recovery behaviors:
 
 - Before commit: roll back to the previous deployment.
 - After commit: keep the new deployment and finish cleanup.
 
-Resolve an unfinished transaction before applying a newly supplied manifest.
+Resolve an unfinished transaction before applying a newly supplied declaration.
 Check expected file contents during recovery as well as normal application.
-If external changes prevent safe recovery, stop and retain the affected files,
-retained originals, and journal rather than silently overwriting those changes.
+Prevalidate all recovery actions before starting rollback. If external changes
+prevent safe recovery, stop and retain the files, retained originals, and journal.
 
-## Remaining design and verification
+Detach a resolved transaction by renaming its directory before deleting recovery
+artifacts. An interrupted cleanup must not make an unresolved transaction appear
+to be disposable preparation data.
 
-Exact manifest/state/journal encodings, managed metadata, durable write ordering,
-filesystem synchronization, safe path traversal, and missing-file handling still
-need concrete design and tests. Automatic cleanup when an entire integration is
-removed is not solved by removing individual deployment declarations.
+## Safety limits and remaining work
 
-No crash-recovery, power-loss, concurrency, or real-font recognition guarantee
-has been validated yet.
+Tests exercise isolated real files, injected application failures, interrupted
+application and recovery, conflicts, locks, and symlink boundaries. They do not
+establish production safety.
+
+The engine syncs file contents and directories, but physical power loss and
+filesystem-specific durability are unverified. Fault injection currently unwinds
+the process without automatic recovery; it does not simulate SIGKILL at every
+syscall. Multi-file changes are not externally atomic.
+
+The lock coordinates imprynt using the same state, not independent states or
+other programs. No-follow traversal and non-replacing moves reduce accidental
+redirection and clobbering, but observation and mutation are not one atomic
+operation. Concurrent hostile mutation, parent-directory relocation, and
+case-insensitive or Unicode-equivalent destination aliases are not yet handled
+as a complete safety boundary. Do not run this engine against concurrently
+modified or untrusted destinations.
+
+JSON state and journal documents are limited to 16 MiB. Diagnostics from the
+runtime currently identify error classes; exposing all planner conflicts to a
+future CLI remains work. Directory creation, tree generation, first-party module
+activation, real-font recognition, and Linux runtime execution are unimplemented
+or unverified. Removing an entire integration is not the same as removing
+individual declarations: automatic cleanup in that situation remains unresolved.

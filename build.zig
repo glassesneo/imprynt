@@ -9,5 +9,6 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
     });
     const tests = b.addTest(.{ .root_module = core });
+    b.step("check", "Compile tests without running them").dependOn(&tests.step);
     b.step("test", "Run unit and isolated filesystem tests").dependOn(&b.addRunArtifact(tests).step);
 }
