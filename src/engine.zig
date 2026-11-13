@@ -1,6 +1,7 @@
 const std = @import("std");
 const fs = @import("filesystem.zig");
 const plan = @import("plan.zig");
+const dirs = @import("directories.zig");
 const Io = std.Io;
 const Dir = Io.Dir;
 const Allocator = std.mem.Allocator;
@@ -16,6 +17,7 @@ const State = struct {
     generation: u64,
     root: []const u8,
     files: []const plan.File,
+    directories: []const dirs.Directory = &.{},
 };
 
 const Journal = struct {
@@ -23,6 +25,7 @@ const Journal = struct {
     previous_generation: u64,
     next: State,
     actions: []const plan.Action,
+    created_directories: []const dirs.Directory = &.{},
 };
 
 pub const Options = struct {
@@ -31,6 +34,7 @@ pub const Options = struct {
     interrupt_after: ?usize = null,
     interrupt_recovery_after: ?usize = null,
     fail_after: ?usize = null,
+    on_conflict: ?*const fn (Io, plan.Conflict) void = null,
 };
 
 const Context = struct {
@@ -148,18 +152,19 @@ const Context = struct {
                 if (std.mem.eql(u8, action.path, other.path)) return error.InvalidJournal;
             try self.validateAction(tx, action, i, committed);
         }
+        try dirs.validate(self.allocator, self.io, self.root, tx, journal.created_directories, committed);
         if (!committed) {
             var i = journal.actions.len;
             while (i > 0) {
                 i -= 1;
                 const action = journal.actions[i];
                 try self.validateAction(tx, action, i, false);
-                const p = try fs.parent(self.root, self.io, action.path);
-                defer p.close(self.io);
                 const old_name = try self.name("old", i);
                 const has_old = try fs.observe(tx, self.io, old_name) != .missing;
                 const actual = try fs.observe(self.root, self.io, action.path);
                 if (has_old) {
+                    const p = try fs.parent(self.root, self.io, action.path);
+                    defer p.close(self.io);
                     if (actual != .missing and !fs.matches(actual, action.before)) {
                         try fs.remove(p.dir, self.io, p.basename);
                         try self.recoveryCheckpoint();
@@ -169,9 +174,24 @@ const Context = struct {
                         try self.recoveryCheckpoint();
                     }
                 } else if (action.before == null and actual != .missing) {
+                    const p = try fs.parent(self.root, self.io, action.path);
+                    defer p.close(self.io);
                     try fs.remove(p.dir, self.io, p.basename);
                     try self.recoveryCheckpoint();
                 }
+            }
+            var d = journal.created_directories.len;
+            while (d > 0) {
+                d -= 1;
+                try dirs.removeEmpty(self.root, self.io, journal.created_directories[d]);
+                try self.recoveryCheckpoint();
+            }
+        } else {
+            var d = journal.next.directories.len;
+            while (d > 0) {
+                d -= 1;
+                const dir = journal.next.directories[d];
+                if (!dirs.needed(dir.path, journal.next.files)) try dirs.removeEmpty(self.root, self.io, dir);
             }
         }
         try self.discardTransaction();
@@ -184,14 +204,12 @@ const Context = struct {
         for (entries) |entry| {
             try plan.validatePath(entry.path);
             if (entry.mode & ~@as(u32, 0o777) != 0) return error.InvalidMode;
-            // Initial slice requires existing parent directories.
-            const p = try fs.parent(self.root, self.io, entry.path);
-            p.close(self.io);
         }
         try self.control.createDir(self.io, "transaction", .fromMode(0o700));
         try fs.sync(self.control, self.io);
         const tx = try self.control.openDir(self.io, "transaction", .{ .follow_symlinks = false });
         defer tx.close(self.io);
+        const directory_plan = try dirs.prepare(self.allocator, self.io, self.root, tx, previous.directories, entries);
         const desired = try self.allocator.alloc(plan.File, entries.len);
         for (entries, 0..) |entry, i| {
             desired[i] = .{
@@ -215,11 +233,15 @@ const Context = struct {
             });
         }
         const changes = try plan.build(self.allocator, previous.files, desired, observations.items);
-        if (changes.conflicts.items.len != 0) return error.Conflict;
+        if (changes.conflicts.items.len != 0) {
+            if (self.options.on_conflict) |report| for (changes.conflicts.items) |conflict| report(self.io, conflict);
+            return error.Conflict;
+        }
         const next: State = .{
             .generation = std.math.add(u64, previous.generation, 1) catch return error.GenerationOverflow,
             .root = self.root_path,
             .files = desired,
+            .directories = directory_plan.next,
         };
         for (changes.actions.items, 0..) |action, i| {
             if (action.after != null) {
@@ -238,9 +260,17 @@ const Context = struct {
             .previous_generation = previous.generation,
             .next = next,
             .actions = changes.actions.items,
+            .created_directories = directory_plan.created,
         });
         try fs.move(tx, "journal.next", tx, "journal.json", self.io);
         try self.checkpoint();
+        for (directory_plan.created, 0..) |dir, i| {
+            if (try dirs.observe(self.root, self.io, dir.path) != .missing) return error.Conflict;
+            const p = try fs.parent(self.root, self.io, dir.path);
+            defer p.close(self.io);
+            try fs.move(tx, try dirs.name(self.allocator, i), p.dir, p.basename, self.io);
+            try self.checkpoint();
+        }
         for (changes.actions.items, 0..) |action, i| {
             if (!fs.matches(try fs.observe(self.root, self.io, action.path), action.before)) return error.Conflict;
             const p = try fs.parent(self.root, self.io, action.path);
@@ -271,13 +301,21 @@ const Context = struct {
 
 // Internal application API. Both directories must already exist, be disjoint,
 // and share a filesystem. The control directory is private to this state.
-// The public CLI/schema are intentionally not exposed by this first slice.
-pub fn apply(
+// Parent directories below the managed root are created transactionally.
+pub fn apply(allocator: Allocator, io: Io, root_path: []const u8, control_path: []const u8, entries: []const Entry, options: Options) !void {
+    return run(allocator, io, root_path, control_path, entries, options);
+}
+
+pub fn recover(allocator: Allocator, io: Io, root_path: []const u8, control_path: []const u8) !void {
+    return run(allocator, io, root_path, control_path, null, .{});
+}
+
+fn run(
     allocator: Allocator,
     io: Io,
     root_path: []const u8,
     control_path: []const u8,
-    entries: []const Entry,
+    entries: ?[]const Entry,
     options: Options,
 ) !void {
     if (!std.fs.path.isAbsolute(root_path) or !std.fs.path.isAbsolute(control_path)) return error.PathNotAbsolute;
@@ -316,7 +354,8 @@ pub fn apply(
         .root_path = canonical_root,
         .options = options,
     };
-    context.apply(entries) catch |err| {
+    const result = if (entries) |files| context.apply(files) else context.recover();
+    result catch |err| {
         if (err != error.InjectedCrash) context.recover() catch return error.RecoveryRequired;
         return err;
     };
@@ -523,7 +562,7 @@ test "nested existing directories work but symlink parents do not" {
     if (f.run(&.{.{ .path = "alias/B.ttf", .source = f.source }}, .{})) {
         return error.FollowedSymlink;
     } else |err| {
-        try std.testing.expect(err == error.NotDir or err == error.SymLinkLoop);
+        try std.testing.expect(err == error.Conflict);
     }
     try f.expectFile("root/fonts/A.ttf", "version one");
     try std.testing.expectError(error.FileNotFound, f.tmp.dir.statFile(io, "root/fonts/B.ttf", .{}));
@@ -590,4 +629,94 @@ test "corrupt journals are retained with backups rather than treated as preparat
     try std.testing.expectError(error.RecoveryRequired, f.run(&.{}, .{}));
     try f.expectFile("control/transaction/old-0", "version one");
     try f.expectFile("control/transaction/journal.json", "{");
+}
+
+test "created directories are removed empty but preexisting and manual contents survive" {
+    const io = std.testing.io;
+    var f = try Fixture.init();
+    defer f.deinit();
+    try f.tmp.dir.createDir(io, "root/existing", .default_dir);
+    const entries = [_]Entry{
+        .{ .path = "made/nested/A.ttf", .source = f.source },
+        .{ .path = "existing/B.ttf", .source = f.source },
+    };
+    try f.run(&entries, .{});
+    try f.expectFile("root/made/nested/A.ttf", "version one");
+    try f.run(&.{}, .{});
+    try std.testing.expectError(error.FileNotFound, f.tmp.dir.statFile(io, "root/made", .{}));
+    _ = try f.tmp.dir.statFile(io, "root/existing", .{});
+    try f.run(&entries, .{});
+    try f.tmp.dir.writeFile(io, .{ .sub_path = "root/made/nested/manual", .data = "keep" });
+    try f.run(&.{}, .{});
+    try f.expectFile("root/made/nested/manual", "keep");
+    try f.tmp.dir.deleteFile(io, "root/made/nested/manual");
+    try f.run(&.{}, .{});
+    try std.testing.expectError(error.FileNotFound, f.tmp.dir.statFile(io, "root/made", .{}));
+}
+
+test "new directory installation can be interrupted at every checkpoint" {
+    const io = std.testing.io;
+    for (0..5) |checkpoint| {
+        var f = try Fixture.init();
+        defer f.deinit();
+        const entries = [_]Entry{.{ .path = "made/nested/A.ttf", .source = f.source }};
+        try std.testing.expectError(error.InjectedCrash, f.run(&entries, .{ .interrupt_after = checkpoint }));
+        try f.tmp.dir.deleteFile(io, "source");
+        if (checkpoint < 4) {
+            try std.testing.expectError(error.FileNotFound, f.run(&entries, .{}));
+            try std.testing.expectError(error.FileNotFound, f.tmp.dir.statFile(io, "root/made", .{}));
+        } else {
+            try std.testing.expectError(error.FileNotFound, f.run(&entries, .{}));
+            try f.expectFile("root/made/nested/A.ttf", "version one");
+        }
+        try f.run(&.{}, .{});
+        try std.testing.expectError(error.FileNotFound, f.tmp.dir.statFile(io, "root/made", .{}));
+    }
+}
+
+test "directory rollback can be interrupted and preserves manual children" {
+    const io = std.testing.io;
+    for (0..4) |checkpoint| {
+        var f = try Fixture.init();
+        defer f.deinit();
+        const entries = [_]Entry{.{ .path = "made/nested/A.ttf", .source = f.source }};
+        try std.testing.expectError(error.InjectedCrash, f.run(&entries, .{ .interrupt_after = 3 }));
+        try std.testing.expectError(error.InjectedCrash, f.run(&.{}, .{ .interrupt_recovery_after = checkpoint }));
+        try f.run(&.{}, .{});
+        try std.testing.expectError(error.FileNotFound, f.tmp.dir.statFile(io, "root/made", .{}));
+    }
+    var f = try Fixture.init();
+    defer f.deinit();
+    const entries = [_]Entry{.{ .path = "made/nested/A.ttf", .source = f.source }};
+    try std.testing.expectError(error.InjectedCrash, f.run(&entries, .{ .interrupt_after = 3 }));
+    try f.tmp.dir.writeFile(io, .{ .sub_path = "root/made/nested/manual", .data = "keep" });
+    try f.run(&.{}, .{});
+    try f.expectFile("root/made/nested/manual", "keep");
+}
+
+test "directory blockers cause preflight failure without creating other parents" {
+    const io = std.testing.io;
+    var f = try Fixture.init();
+    defer f.deinit();
+    try f.tmp.dir.symLink(io, "../control", "root/link", .{ .is_directory = true });
+    const entries = [_]Entry{
+        .{ .path = "new/deep/A.ttf", .source = f.source },
+        .{ .path = "link/B.ttf", .source = f.source },
+    };
+    try std.testing.expectError(error.Conflict, f.run(&entries, .{}));
+    try std.testing.expectError(error.FileNotFound, f.tmp.dir.statFile(io, "root/new", .{}));
+}
+
+test "a manually replaced unused directory is not removed" {
+    const io = std.testing.io;
+    var f = try Fixture.init();
+    defer f.deinit();
+    try f.run(&.{.{ .path = "made/A.ttf", .source = f.source }}, .{});
+    try f.tmp.dir.writeFile(io, .{ .sub_path = "root/made/manual", .data = "keep" });
+    try f.run(&.{}, .{});
+    try f.tmp.dir.rename("root/made", f.tmp.dir, "root/retired", io);
+    try f.tmp.dir.createDir(io, "root/made", .default_dir);
+    try f.run(&.{}, .{});
+    _ = try f.tmp.dir.statFile(io, "root/made", .{});
+    try f.expectFile("root/retired/manual", "keep");
 }
