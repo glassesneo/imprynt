@@ -67,7 +67,11 @@ pub fn matches(actual: plan.Observed, expected: ?plan.Fingerprint) bool {
 }
 
 pub fn sync(dir: Dir, io: Io) !void {
-    const file: Io.File = .{ .handle = dir.handle, .flags = .{ .nonblocking = false } };
+    // Linux opens non-iterable directories with O_PATH, which fsync rejects.
+    // Reopen the same directory with a readable handle, without following links.
+    const readable = try dir.openDir(io, ".", .{ .iterate = true, .follow_symlinks = false });
+    defer readable.close(io);
+    const file: Io.File = .{ .handle = readable.handle, .flags = .{ .nonblocking = false } };
     try file.sync(io);
 }
 
@@ -111,6 +115,15 @@ pub fn copySource(dir: Dir, io: Io, name: []const u8, source: []const u8, mode: 
     try output.sync(io);
     try sync(dir, io);
     return fingerprint(output, io);
+}
+
+test "directory syncing accepts non-iterable directory handles" {
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const dir = try tmp.dir.openDir(io, ".", .{ .iterate = false });
+    defer dir.close(io);
+    try sync(dir, io);
 }
 
 test "parent traversal rejects symlinks instead of following them" {
