@@ -1,5 +1,6 @@
 { self, lib }:
 {
+  types = import ./types.nix { inherit lib; };
   # The spec references source derivations; enumeration happens in a build,
   # never by reading their outputs during Nix evaluation.
   mkManifest =
