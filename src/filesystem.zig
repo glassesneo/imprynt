@@ -100,7 +100,10 @@ pub fn copySource(dir: Dir, io: Io, name: []const u8, source: []const u8, mode: 
     defer output.close(io);
     var buffer: [64 * 1024]u8 = undefined;
     while (true) {
-        const n = try input.readStreaming(io, &.{&buffer});
+        const n = input.readStreaming(io, &.{&buffer}) catch |err| switch (err) {
+            error.EndOfStream => break,
+            else => return err,
+        };
         if (n == 0) break;
         try output.writeStreamingAll(io, buffer[0..n]);
     }
