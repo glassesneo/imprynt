@@ -55,6 +55,6 @@
         --manifest ${manifest}
     ''
     // {
-      inherit manifest;
+      inherit manifest root stateDirectory;
     };
 }
