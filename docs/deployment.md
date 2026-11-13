@@ -26,8 +26,8 @@ managed file currently produces a conflict rather than being recreated.
 
 ## Ownership and conflicts
 
-Ownership is per deployed file, even when a future generator accepts input trees.
-Unrelated manual files survive updates and removal of a deployment declaration.
+Ownership is per deployed file, including files generated from input trees.
+Unrelated manual files survive updates and reconciliation to an empty declaration.
 There is no directory-ownership mode in the initial scope.
 
 Compare actual managed files with the last committed state before updating or
@@ -112,8 +112,8 @@ modified or untrusted destinations.
 
 JSON state and journal documents are limited to 16 MiB. Path-specific diagnostics in the
 CLI are available for preflight conflicts; recovery diagnostics currently report
-an error class and retain the journal. First-party module activation and Linux
-runtime execution are unimplemented or unverified. Font discovery and application
+an error class and retain the journal. First-party framework modules are not
+implemented. Font discovery and application
 font caches belong to the consumer's platform integration, not the engine's
 commit. Removing an entire integration is not the same as removing
 individual declarations: automatic cleanup in that situation remains unresolved.

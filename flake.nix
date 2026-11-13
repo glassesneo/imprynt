@@ -17,7 +17,6 @@
     let
       systems = [
         "aarch64-darwin"
-        "x86_64-darwin"
         "aarch64-linux"
         "x86_64-linux"
       ];
@@ -77,6 +76,7 @@
         default = {
           type = "app";
           program = "${self.packages.${system}.imprynt}/bin/imprynt";
+          inherit (self.packages.${system}.imprynt) meta;
         };
       });
       devShells = nixpkgs.lib.genAttrs systems (

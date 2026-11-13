@@ -26,7 +26,17 @@ files. The tests do not establish production safety.
 
 ## Nix integration
 
-Given an imprynt flake input, create a deployment with the consumer's `pkgs`:
+Add the flake input, following the consumer's Nixpkgs:
+
+```nix
+inputs.imprynt = {
+  url = "github:glassesneo/imprynt";
+  inputs.nixpkgs.follows = "nixpkgs";
+};
+```
+
+With `imprynt` from your flake outputs' inputs, create a deployment using the
+consumer's `pkgs`:
 
 ```nix
 imprynt.lib.mkDeployment {
@@ -53,12 +63,14 @@ between unrelated deployments.
 separately. Trees are enumerated during a build, without import-from-derivation.
 Each tree preserves relative paths beneath its optional prefix. Explicit files
 have `path`, `source`, and optional numeric `mode` (default 420, or POSIX 0644).
-The deployment package exposes its generated `manifest`.
+The deployment package exposes `manifest`, `root`, and `stateDirectory`.
+`lib.types.entry` and `lib.types.tree` provide matching Nix option types for
+consumer-owned modules.
 
 ## CLI
 
 ```sh
-nix run . -- --help
+nix run github:glassesneo/imprynt -- --help
 imprynt apply --root /absolute/destination --state /absolute/private/state --manifest files.json
 imprynt recover --root /absolute/destination --state /absolute/private/state
 ```
@@ -95,6 +107,12 @@ zig build check -Dtarget=aarch64-linux
 zig build check -Dtarget=x86_64-linux
 ```
 
-Runtime tests are currently exercised on aarch64-darwin. Linux runtime behavior
-and editor integration have not been verified. The pinned Nixpkgs does not
-support x86_64-darwin.
+The flake exposes aarch64-darwin, aarch64-linux, and x86_64-linux outputs.
+CI runs the native engine and integration checks on each platform. Font discovery
+and framework activation are separate from these checks. See the
+[deployment safety limits](docs/deployment.md#safety-limits-and-remaining-work)
+for behavior they do not establish.
+
+## License
+
+[MIT](LICENSE).
