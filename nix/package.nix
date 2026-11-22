@@ -1,6 +1,7 @@
 {
   lib,
   runCommand,
+  stdenv,
   zig,
   impryntSource ? lib.fileset.toSource {
     root = ../.;
@@ -11,6 +12,16 @@
     ];
   },
 }:
+let
+  # Nix shares these packages across CPUs of the same system.
+  target =
+    {
+      aarch64-darwin = "aarch64-macos";
+      aarch64-linux = "aarch64-linux";
+      x86_64-linux = "x86_64-linux";
+    }
+    .${stdenv.hostPlatform.system};
+in
 runCommand "imprynt-0.1.0"
   {
     nativeBuildInputs = [ zig ];
@@ -32,7 +43,7 @@ runCommand "imprynt-0.1.0"
     cd source
     export ZIG_GLOBAL_CACHE_DIR="$TMPDIR/zig-global"
     export ZIG_LOCAL_CACHE_DIR="$TMPDIR/zig-local"
-    zig build -Doptimize=ReleaseSafe --prefix "$out" --summary all
+    zig build -Dtarget=${target} -Dcpu=baseline -Doptimize=ReleaseSafe --prefix "$out" --summary all
     mkdir -p "$out/share/licenses/imprynt"
     cp LICENSE "$out/share/licenses/imprynt/LICENSE"
   ''
