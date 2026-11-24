@@ -116,4 +116,6 @@ an error class and retain the journal. First-party framework modules are not
 implemented. Font discovery and application
 font caches belong to the consumer's platform integration, not the engine's
 commit. Removing an entire integration is not the same as removing
-individual declarations: automatic cleanup in that situation remains unresolved.
+individual declarations: a deployment managed through `mkDeployments` is
+retired when its entry is removed, but a standalone deployment whose apply step
+is no longer run is not cleaned up.

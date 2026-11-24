@@ -361,6 +361,75 @@ fn run(
     };
 }
 
+const Recorded = struct {
+    root: []const u8,
+};
+
+const RecordedJournal = struct {
+    next: Recorded,
+};
+
+fn readRecorded(comptime T: type, a: Allocator, io: Io, dir: Dir, filename: []const u8) !?T {
+    const file = dir.openFile(io, filename, .{ .follow_symlinks = false }) catch |err| switch (err) {
+        error.FileNotFound => return null,
+        else => return err,
+    };
+    defer file.close(io);
+    const stat = try file.stat(io);
+    if (stat.kind != .file or stat.size > 16 * 1024 * 1024) return error.InvalidState;
+    const bytes = try a.alloc(u8, @intCast(stat.size));
+    if (try file.readPositionalAll(io, bytes, 0) != bytes.len) return error.InvalidState;
+    return (try std.json.parseFromSlice(T, a, bytes, .{ .allocate = .alloc_always, .ignore_unknown_fields = true })).value;
+}
+
+// Removes every file a state manages, recovering an unfinished transaction
+// first, then the state directory itself. The root is the one the state
+// recorded. A directory holding anything but imprynt state is refused.
+pub fn retire(allocator: Allocator, io: Io, control_path: []const u8) !void {
+    if (!std.fs.path.isAbsolute(control_path)) return error.PathNotAbsolute;
+    var arena: std.heap.ArenaAllocator = .init(allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const canonical_control = try Dir.realPathFileAbsoluteAlloc(io, control_path, a);
+    const parent_path = std.fs.path.dirname(canonical_control) orelse return error.InvalidState;
+    var root_path: ?[]const u8 = null;
+    var pending = false;
+    {
+        const control = try Dir.openDirAbsolute(io, canonical_control, .{ .iterate = true, .follow_symlinks = false });
+        defer control.close(io);
+        var iterator = control.iterate();
+        while (try iterator.next(io)) |entry| {
+            const known = for ([_][]const u8{ "lock", "state.json", "transaction", "cleanup" }) |name| {
+                if (std.mem.eql(u8, entry.name, name)) break true;
+            } else false;
+            if (!known) return error.InvalidState;
+            if (std.mem.eql(u8, entry.name, "transaction")) pending = true;
+        }
+        if (try readRecorded(Recorded, a, io, control, "state.json")) |recorded| root_path = recorded.root;
+        if (pending) {
+            const tx = try control.openDir(io, "transaction", .{ .follow_symlinks = false });
+            defer tx.close(io);
+            if (try readRecorded(RecordedJournal, a, io, tx, "journal.json")) |journal| root_path = journal.next.root;
+        }
+    }
+    if (root_path) |root| {
+        const present = if (Dir.openDirAbsolute(io, root, .{ .follow_symlinks = false })) |dir| blk: {
+            dir.close(io);
+            break :blk true;
+        } else |err| switch (err) {
+            error.FileNotFound => false,
+            else => return err,
+        };
+        if (present) {
+            try run(allocator, io, root, canonical_control, &.{}, .{});
+        } else if (pending) return error.RecoveryRequired;
+    }
+    const parent = try Dir.openDirAbsolute(io, parent_path, .{ .follow_symlinks = false });
+    defer parent.close(io);
+    try parent.deleteTree(io, std.fs.path.basename(canonical_control));
+    try fs.sync(parent, io);
+}
+
 fn contains(root: []const u8, path: []const u8) bool {
     return std.mem.eql(u8, root, path) or std.mem.eql(u8, root, "/") or
         (path.len > root.len and std.mem.startsWith(u8, path, root) and path[root.len] == '/');
@@ -719,4 +788,58 @@ test "a manually replaced unused directory is not removed" {
     try f.run(&.{}, .{});
     _ = try f.tmp.dir.statFile(io, "root/made", .{});
     try f.expectFile("root/retired/manual", "keep");
+}
+
+test "retiring a state removes its files and the state, and leaves manual siblings" {
+    const io = std.testing.io;
+    var f = try Fixture.init();
+    defer f.deinit();
+    try f.tmp.dir.writeFile(io, .{ .sub_path = "root/manual.ttf", .data = "manual" });
+    try f.run(&.{f.entry()}, .{});
+    try retire(std.testing.allocator, io, f.control);
+    try std.testing.expectError(error.FileNotFound, f.tmp.dir.statFile(io, "root/A.ttf", .{}));
+    try std.testing.expectError(error.FileNotFound, f.tmp.dir.statFile(io, "control", .{}));
+    try f.expectFile("root/manual.ttf", "manual");
+}
+
+test "retiring finishes an interrupted transaction before removing its files" {
+    const io = std.testing.io;
+    var f = try Fixture.init();
+    defer f.deinit();
+    try std.testing.expectError(error.InjectedCrash, f.run(&.{f.entry()}, .{ .interrupt_after = 1 }));
+    try retire(std.testing.allocator, io, f.control);
+    try std.testing.expectError(error.FileNotFound, f.tmp.dir.statFile(io, "root/A.ttf", .{}));
+    try std.testing.expectError(error.FileNotFound, f.tmp.dir.statFile(io, "control", .{}));
+}
+
+test "retiring keeps a state whose managed file was changed outside imprynt" {
+    const io = std.testing.io;
+    var f = try Fixture.init();
+    defer f.deinit();
+    try f.run(&.{f.entry()}, .{});
+    try f.tmp.dir.writeFile(io, .{ .sub_path = "root/A.ttf", .data = "manual replacement" });
+    try std.testing.expect(std.meta.isError(retire(std.testing.allocator, io, f.control)));
+    try f.expectFile("root/A.ttf", "manual replacement");
+    _ = try f.tmp.dir.statFile(io, "control/state.json", .{});
+}
+
+test "retiring refuses a directory that is not only imprynt state" {
+    const io = std.testing.io;
+    var f = try Fixture.init();
+    defer f.deinit();
+    try f.run(&.{f.entry()}, .{});
+    try f.tmp.dir.writeFile(io, .{ .sub_path = "control/notes", .data = "someone else's" });
+    try std.testing.expectError(error.InvalidState, retire(std.testing.allocator, io, f.control));
+    try f.expectFile("root/A.ttf", "version one");
+    try f.expectFile("control/notes", "someone else's");
+}
+
+test "retiring a state whose root is gone removes only the state" {
+    const io = std.testing.io;
+    var f = try Fixture.init();
+    defer f.deinit();
+    try f.run(&.{f.entry()}, .{});
+    try f.tmp.dir.deleteTree(io, "root");
+    try retire(std.testing.allocator, io, f.control);
+    try std.testing.expectError(error.FileNotFound, f.tmp.dir.statFile(io, "control", .{}));
 }

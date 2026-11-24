@@ -59,6 +59,26 @@ manifest. Keep this step registered with an empty declaration when removing
 its last file, so removal is reconciled. Do not share one state directory
 between unrelated deployments.
 
+To manage a changing set of deployments, use `lib.mkDeployments`:
+
+```nix
+imprynt.lib.mkDeployments {
+  inherit pkgs;
+  stateDirectory = "/absolute/private/states";
+  deployments.fonts = {
+    root = "/absolute/destination";
+    trees = [ ... ];
+  };
+}
+```
+
+Each deployment keeps its state in a subdirectory named after it. Its
+`bin/apply` first retires every state there whose name is no longer declared,
+removing the files it manages, then applies the declared deployments. Removing
+or renaming an entry is therefore enough to clean up after it. The state
+directory belongs to the set: a subdirectory that is not imprynt state stops the
+application.
+
 `lib.mkManifest { pkgs; files = [...]; trees = [...]; }` exposes generation
 separately. Trees are enumerated during a build, without import-from-derivation.
 Each tree preserves relative paths beneath its optional prefix. Explicit files
@@ -73,12 +93,14 @@ consumer-owned modules.
 nix run github:glassesneo/imprynt -- --help
 imprynt apply --root /absolute/destination --state /absolute/private/state --manifest files.json
 imprynt recover --root /absolute/destination --state /absolute/private/state
+imprynt retire --state /absolute/private/state
 ```
 
 Direct CLI use requires existing root and state directories. A manifest is
 `{"version":1,"files":[{"path":"relative/file","source":"/absolute/source"}]}`.
 `recover` resolves an unfinished transaction without applying a new declaration;
-it does not remove an otherwise committed deployment.
+it does not remove an otherwise committed deployment. `retire` removes every
+file a state manages, at the root it recorded, and then the state itself.
 
 ## Development
 

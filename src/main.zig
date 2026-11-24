@@ -2,7 +2,7 @@ const std = @import("std");
 const imprynt = @import("imprynt");
 const manifest = imprynt.manifest;
 
-const Command = enum { apply, recover, generate };
+const Command = enum { apply, recover, retire, generate };
 const Arguments = struct {
     command: Command,
     root: ?[]const u8 = null,
@@ -16,6 +16,7 @@ const usage =
     \\Usage:
     \\  imprynt apply --root ABSOLUTE --state ABSOLUTE --manifest FILE
     \\  imprynt recover --root ABSOLUTE --state ABSOLUTE
+    \\  imprynt retire --state ABSOLUTE
     \\  imprynt generate --spec FILE --output FILE
     \\
     \\Root and state directories must already exist, be disjoint, and share a
@@ -47,6 +48,9 @@ fn parse(args: []const []const u8) !Arguments {
     switch (result.command) {
         .generate => {
             if (result.spec == null or result.output == null or result.root != null or result.state != null or result.manifest != null) return error.InvalidArguments;
+        },
+        .retire => {
+            if (result.state == null or result.root != null or result.manifest != null or result.spec != null or result.output != null) return error.InvalidArguments;
         },
         .apply, .recover => {
             if (result.root == null or result.state == null or result.spec != null or result.output != null) return error.InvalidArguments;
@@ -81,6 +85,7 @@ fn run(init: std.process.Init) !void {
                 try imprynt.engine.apply(a, init.io, options.root.?, options.state.?, desired.files, .{ .on_conflict = reportConflict });
             }
         },
+        .retire => try imprynt.engine.retire(a, init.io, options.state.?),
         .generate => {
             const spec = try manifest.read(manifest.Spec, a, init.io, options.spec.?);
             const generated = try manifest.generate(a, init.io, spec);
@@ -109,6 +114,7 @@ test "CLI requires explicit complete arguments and rejects duplicate or irreleva
     try std.testing.expectError(error.InvalidArguments, parse(&.{ "apply", "--root", "/root", "--state", "/state" }));
     try std.testing.expectError(error.InvalidArguments, parse(&.{ "recover", "--root", "/root", "--state", "/state", "--manifest", "files" }));
     try std.testing.expectError(error.InvalidArguments, parse(&.{ "recover", "--root", "/root", "--root", "/root", "--state", "/state" }));
+    try std.testing.expectError(error.InvalidArguments, parse(&.{ "retire", "--root", "/root", "--state", "/state" }));
     const result = try parse(&.{ "recover", "--root", "/root", "--state", "/state" });
     try std.testing.expectEqual(Command.recover, result.command);
 }

@@ -23,6 +23,35 @@ let
       }
     ];
   };
+  set =
+    deployments:
+    impryntLib.mkDeployments {
+      inherit pkgs package deployments;
+      stateDirectory = "/@states@";
+    };
+  deployment = name: {
+    root = "/@root@/${name}";
+    files = [
+      {
+        path = "${name}.ttf";
+        source = "${source}/fonts/original.ttf";
+      }
+    ];
+  };
+  both = set {
+    a = deployment "a";
+    b = deployment "b";
+  };
+  onlyA = set { a = deployment "a"; };
+  rejected = name: !(builtins.tryEval (set { ${name} = deployment "x"; }).drvPath).success;
+  unsafeNames = [
+    ""
+    "."
+    ".."
+    "../escape"
+    "/absolute"
+    "nested/name"
+  ];
   empty = pkgs.writeText "imprynt-empty.json" (
     builtins.toJSON {
       version = 1;
@@ -30,6 +59,7 @@ let
     }
   );
 in
+assert pkgs.lib.all rejected unsafeNames;
 pkgs.runCommand "imprynt-integration-tests"
   {
     nativeBuildInputs = [
@@ -63,5 +93,31 @@ pkgs.runCommand "imprynt-integration-tests"
     imprynt recover --root "$root" --state "$state"
     imprynt apply --root "$root" --state "$state" --manifest ${empty}
     test ! -e "$root/nested"
+
+    imprynt apply --root "$root" --state "$state" --manifest ${manifest}
+    imprynt retire --state "$state"
+    test ! -e "$root/nested"
+    test ! -e "$state"
+
+    run_set() {
+      sed -e "s|/@states@|$PWD/states|g" -e "s|/@root@|$PWD/set|g" "$1/bin/apply" > set-apply
+      bash set-apply
+    }
+    run_set ${both}
+    test -f set/a/a.ttf
+    test -f set/b/b.ttf
+    printf 'manual' > set/b/manual
+    run_set ${onlyA} > retired
+    grep -F 'imprynt: retired b' retired
+    test -f set/a/a.ttf
+    test ! -e set/b/b.ttf
+    test ! -e states/b
+    test "$(cat set/b/manual)" = manual
+    mkdir states/foreign && touch states/foreign/notes
+    if run_set ${onlyA} 2> refused; then
+      echo 'unexpected retirement of a directory that is not imprynt state' >&2
+      exit 1
+    fi
+    test -f states/foreign/notes
     touch "$out"
   ''
